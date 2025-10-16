@@ -1,0 +1,23 @@
+.hotspot-name { font-weight: 700; color: #1a3; margin-right: 6px; }
+.hotspot-meta { color: #444; margin-left: 4px; }
+
+/* Species button and container */
+.hotspot-species-count {
+  background: transparent;
+  border: none;
+  color: #0066cc;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  font: inherit;
+}
+.hotspot-species-count:disabled { opacity: 0.6; cursor: default; }
+
+.species-container { display: none; margin-top: 6px; }
+.species-container[aria-hidden="false"] { display: block; }
+
+.species-list { list-style: disc; padding-left: 1.2rem; margin: 6px 0; }
+.bird-name { color: #2b5; font-style: italic; margin: 2px 0; }
+.species-error { color: #a33; }
+.no-species { color: #666; font-size: 0.95rem; }
+
