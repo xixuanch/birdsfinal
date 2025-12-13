@@ -18,9 +18,21 @@ const SERVER_NAME = "api.ebird.org"; // {{serverName}}
 const CONTEXT_ROOT = "v2"; // {{contextRoot}}
 
 document.getElementById("findHotspotsBtn").addEventListener("click", async () => {
+  const loader = document.getElementById('loader');
+  const button = document.getElementById('findHotspotsBtn');
+
+  // Show loader immediately and disable the button so the user gets instant feedback.
+  if (loader) loader.classList.add('active');
+  if (button) button.disabled = true;
+
+  // Allow the browser one frame to paint the loader before doing more work.
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+
   // Check if the browser supports the Geolocation API
   if (!navigator.geolocation) {
     alert("Geolocation is not supported by this browser.");
+    if (loader) loader.classList.remove('active');
+    if (button) button.disabled = false;
     return;
   }
 
@@ -47,7 +59,12 @@ document.getElementById("findHotspotsBtn").addEventListener("click", async () =>
             successCallback({ coords: { latitude: parseFloat(lat), longitude: parseFloat(lng) } });
           } else {
             alert('Invalid coordinates entered. Please try again or enable location in your browser settings.');
+            if (loader) loader.classList.remove('active');
+            if (button) button.disabled = false;
           }
+        } else {
+          if (loader) loader.classList.remove('active');
+          if (button) button.disabled = false;
         }
         return;
       }
@@ -62,7 +79,12 @@ document.getElementById("findHotspotsBtn").addEventListener("click", async () =>
   // remembered; the app cannot force indefinite permission.
   navigator.geolocation.getCurrentPosition(
     successCallback,
-    errorCallback,
+    (err) => {
+      // If geolocation fails, ensure the loader is hidden and button re-enabled
+      if (loader) loader.classList.remove('active');
+      if (button) button.disabled = false;
+      errorCallback(err);
+    },
     { enableHighAccuracy: true, timeout: 30000, maximumAge: 60000 }
   );
 });
@@ -71,7 +93,6 @@ function successCallback(position) {
   const lat = position.coords.latitude.toFixed(2);
   const lng = position.coords.longitude.toFixed(2);
   console.log(`Location acquired: Lat ${lat}, Lng ${lng}`);
-
   // Proceed to fetch nearby hotspots
   fetchHotspots(lat, lng);
 }
@@ -101,6 +122,9 @@ async function fetchHotspots(lat, lng) {
   const maxDistKm = 25;
   const maxResults = 10;
 
+  const loader = document.getElementById('loader');
+  const button = document.getElementById('findHotspotsBtn');
+
   // FIX: Define the localProxyUrl, using the lat/lng from the Geolocation successCallback
   const localProxyUrl = `http://localhost:3000/api/hotspots?lat=${lat}&lng=${lng}&dist=${maxDistKm}&maxResults=${maxResults}`;
 
@@ -114,20 +138,46 @@ async function fetchHotspots(lat, lng) {
     }
 
     const hotspots = await response.json();
-    renderHotspots(hotspots, parseFloat(lat), parseFloat(lng));
+      // Try to fetch recent observations (second data source) and match them to hotspots
+      let observations = [];
+      try {
+        observations = await fetchRecentObservations(lat, lng, 200);
+        console.log('recentObservations received (count):', Array.isArray(observations) ? observations.length : 'non-array');
+      } catch (err) {
+        console.warn('recentObservations fetch failed:', err);
+        observations = [];
+      }
+
+      // Render hotspots enriched with matched species from observations
+      renderHotspots(hotspots, parseFloat(lat), parseFloat(lng), observations);
+      // hide loader and re-enable button after rendering
+      if (loader) loader.classList.remove('active');
+      if (button) button.disabled = false;
   } catch (error) {
     console.error("Fetch error:", error);
     document.getElementById(
       "hotspotList"
     ).innerHTML = `<li>API Error: ${error.message}. Check console for details.</li>`;
+    // hide loader and re-enable button on error
+    if (loader) loader.classList.remove('active');
+    if (button) button.disabled = false;
   }
+}
+
+// Client helper to call the new server proxy endpoint for recent observations by geo
+async function fetchRecentObservations(lat, lng, maxResults = 100) {
+  const url = `/api/recentObservations?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}&maxResults=${encodeURIComponent(maxResults)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 // NOTE: Also ensure you have removed the old ebird API key and server vars like 'birdApiKey', 'SERVER_NAME', 'CONTEXT_ROOT'
 // if you are fully adopting the proxy approach, as they are no longer used client-side.
 
 // Function to process and display the results
-function renderHotspots(hotspots, userLat, userLng) {
+// observations: optional array of recent observations from the second API
+function renderHotspots(hotspots, userLat, userLng, observations = []) {
   const list = document.getElementById("hotspotList");
   list.innerHTML = ""; // Clear previous results
 
@@ -157,14 +207,98 @@ function renderHotspots(hotspots, userLat, userLng) {
     h.__distanceKm = Number.isFinite(hLat) && Number.isFinite(hLng) && Number.isFinite(userLat) && Number.isFinite(userLng)
       ? haversineDistance(userLat, userLng, hLat, hLng)
       : Infinity;
+    // store normalized coords for matching
+    h.__lat = hLat;
+    h.__lng = hLng;
+    h.__matchedSpecies = []; // will populate from observations
   });
+
+  // If observations were provided, match them to hotspots.
+  if (Array.isArray(observations) && observations.length > 0) {
+    const MAX_MATCH_KM = 0.5; // 500m
+
+    // Build a quick map of hotspots by locId for exact matching
+    const hotspotByLocId = new Map();
+    hotspots.forEach(h => {
+      const id = (h.locId || h.loc_id || h.locid || '').toString();
+      if (id) hotspotByLocId.set(id, h);
+    });
+
+    // Helper to add species into hotspot.__matchedSpecies with dedupe
+    const addSpeciesToHotspot = (h, speciesName, speciesCode) => {
+      if (!h) return;
+      const key = speciesCode || speciesName;
+      if (!key) return;
+      // store unique by key
+      if (!h.__matchedSpeciesKeys) h.__matchedSpeciesKeys = new Set();
+      if (h.__matchedSpeciesKeys.has(key)) return;
+      h.__matchedSpeciesKeys.add(key);
+      h.__matchedSpecies.push(speciesName || speciesCode);
+    };
+
+    // For each observation, try locId match first, else proximity match
+    observations.forEach(obs => {
+      const obsLocId = (obs.locId || obs.loc_id || obs.locationId || '').toString();
+      const comName = obs.comName || obs.comname || obs.sciName || obs.speciesCode || null;
+      const speciesCode = obs.speciesCode || obs.species_code || null;
+
+      if (obsLocId && hotspotByLocId.has(obsLocId)) {
+        const h = hotspotByLocId.get(obsLocId);
+        addSpeciesToHotspot(h, comName, speciesCode);
+        return;
+      }
+
+      // fallback: match by coordinates if available
+      const oLat = obs.lat !== undefined ? parseFloat(obs.lat) : (obs.latitude !== undefined ? parseFloat(obs.latitude) : null);
+      const oLng = obs.lng !== undefined ? parseFloat(obs.lng) : (obs.longitude !== undefined ? parseFloat(obs.longitude) : null);
+      if (oLat == null || oLng == null || Number.isNaN(oLat) || Number.isNaN(oLng)) return;
+
+      // find nearest hotspot within MAX_MATCH_KM
+      let nearest = null;
+      let nearestKm = Infinity;
+      hotspots.forEach(h => {
+        if (!Number.isFinite(h.__lat) || !Number.isFinite(h.__lng)) return;
+        const d = haversineDistance(oLat, oLng, h.__lat, h.__lng);
+        if (d < nearestKm) { nearest = h; nearestKm = d; }
+      });
+
+      if (nearest && Number.isFinite(nearestKm) && nearestKm <= MAX_MATCH_KM) {
+        addSpeciesToHotspot(nearest, comName, speciesCode);
+      }
+    });
+
+    // Clean up helper sets to avoid leaking across renders
+    hotspots.forEach(h => { if (h.__matchedSpeciesKeys) delete h.__matchedSpeciesKeys; });
+  }
 
   // Sort by computed distance (ascending)
   hotspots.sort((a, b) => (a.__distanceKm || Infinity) - (b.__distanceKm || Infinity));
 
+  // Filter out hotspots beyond 8 km so the list only shows nearby locations
+  const MAX_DISPLAY_KM = 8;
+  const beforeCount = hotspots.length;
+  hotspots = hotspots.filter(h => Number.isFinite(h.__distanceKm) && h.__distanceKm <= MAX_DISPLAY_KM);
+  const afterCount = hotspots.length;
+
+  if (!Array.isArray(hotspots) || hotspots.length === 0) {
+    if (beforeCount > 0 && afterCount === 0) {
+      list.innerHTML = `<li>No hotspots within ${MAX_DISPLAY_KM} km. Try increasing the search distance.</li>`;
+    } else {
+      list.innerHTML = "<li>No nearby hotspots found. Try increasing the distance parameter.</li>";
+    }
+    return;
+  }
+
   // Render sorted list with distance displayed
-  hotspots.forEach((hotspot) => {
+  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  hotspots.forEach((hotspot, idx) => {
     const listItem = document.createElement("li");
+    listItem.classList.add('hotspot-item');
+    // Staggered delays so items fade in one after another
+    if (!reduceMotion) {
+      const delayMs = 200 + idx * 80; // first item 200ms, then +80ms each
+      listItem.style.animationDelay = `${delayMs}ms`;
+    }
     const latestObsText = hotspot.latestObsDt ? ` (Last Obs: ${hotspot.latestObsDt})` : "";
 
     // Prefer locName but fall back to name
@@ -174,57 +308,20 @@ function renderHotspots(hotspots, userLat, userLng) {
     listItem.innerHTML = `
       <span class="hotspot-name">${escapeHtml(name)}</span>
       <span class="hotspot-meta"> 
-        <button class="hotspot-species-count" data-locid="${escapeHtml(hotspot.locId || hotspot.loc_id || '')}">
+        <span class="hotspot-species-count" disabled>
           ${hotspot.numSpeciesAllTime || "—"} spp.
-        </button>
+        </span>
         ${distanceText}${latestObsText}
       </span>
       <div class="species-container" aria-hidden="true"></div>
     `;
 
-    // Attach click handler to the species-count button to fetch and toggle species
+    // Species button is disabled - no click handler
     const speciesBtn = listItem.querySelector('.hotspot-species-count');
     const speciesContainer = listItem.querySelector('.species-container');
     let speciesLoaded = false;
 
-    speciesBtn.addEventListener('click', async (e) => {
-      const locId = speciesBtn.getAttribute('data-locid');
-      if (!locId) {
-        speciesContainer.innerHTML = '<div class="species-error">No hotspot identifier (locId) available for this hotspot.</div>';
-        speciesContainer.style.display = 'block';
-        speciesContainer.setAttribute('aria-hidden', 'false');
-        return;
-      }
-
-      // Toggle visibility if already loaded
-      if (speciesLoaded) {
-        const isHidden = speciesContainer.getAttribute('aria-hidden') === 'true';
-        speciesContainer.setAttribute('aria-hidden', String(!isHidden));
-        speciesContainer.style.display = isHidden ? 'block' : 'none';
-        return;
-      }
-
-      speciesBtn.disabled = true;
-      speciesBtn.textContent = 'Loading...';
-      try {
-        const species = await fetchSpeciesForHotspot(locId);
-        renderSpeciesList(speciesContainer, species);
-        speciesLoaded = true;
-        speciesContainer.setAttribute('aria-hidden', 'false');
-        speciesContainer.style.display = 'block';
-        speciesBtn.textContent = `${hotspot.numSpeciesAllTime || '—'} spp.`;
-      } catch (err) {
-        console.error('Failed to load species for', locId, err);
-        // Prefer message from Error object (which may contain server response text)
-        const msg = err && err.message ? err.message : String(err);
-        speciesContainer.innerHTML = `<div class="species-error">Failed to load species: ${escapeHtml(msg)}</div>`;
-        speciesContainer.style.display = 'block';
-        speciesContainer.setAttribute('aria-hidden', 'false');
-        speciesBtn.textContent = 'Error';
-      } finally {
-        speciesBtn.disabled = false;
-      }
-    });
+    // Species button is disabled - no click listener
 
     list.appendChild(listItem);
   });

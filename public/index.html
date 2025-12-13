@@ -3,11 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <title>eBird Hotspot Finder</title>
+    <link rel="stylesheet" href="design.css">
+    <!-- Use Lora for a warm, friendly serif and a clean sans fallback -->
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;700&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
   </head>
   <body>
-    <button id="findHotspotsBtn">Find Nearby Hotspots</button>
+    <header class="site-header">
+      <div class="container">
+        <h1 class="site-title">eBird Hotspot Finder</h1>
+        <p class="site-subtitle">Discover nearby birding hotspots</p>
+      </div>
+    </header>
 
-    <ul id="hotspotList"></ul>
+    <main class="container">
+      <div class="controls">
+        <button id="findHotspotsBtn">Find Nearby Hotspots</button>
+        <div id="loader" class="loader" aria-hidden="true" aria-live="polite">
+          <span class="visually-hidden">Loading hotspots...</span>
+        </div>
+      </div>
+
+      <ul id="hotspotList"></ul>
+    </main>
 
     <script src="script.js"></script>
   </body>

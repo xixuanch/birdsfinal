@@ -15,8 +15,6 @@ app.use((req, res, next) => {
 
 
 
-// Serve static files from /public folder (useful when running Node locally, optional on Vercel).
-app.use(express.static('public'))
 // Define index.html as the root explicitly (useful on Vercel, optional when running Node locally).
 app.get('/', (req, res) => { res.redirect('/index.html') })
 
@@ -95,6 +93,61 @@ app.get("/api/hotspotSpecies", async (req, res) => {
   } catch (error) {
     console.error("Server Proxy Failed (hotspotSpecies):", error);
     res.status(500).send("Internal server error during fetch to eBird.");
+  }
+});
+
+// Proxy endpoint to fetch recent observations by geographic coordinates
+app.get("/api/recentObservations", async (req, res) => {
+  console.log('/api/recentObservations request received, query=', req.query);
+  const apiKey = process.env.EBIRD_API_KEY;
+  const { lat, lng, maxResults } = req.query;
+
+  if (!lat || !lng) {
+    return res.status(400).send("Missing required latitude or longitude parameters.");
+  }
+
+  if (!apiKey) {
+    console.error("EBIRD_API_KEY is not set in environment variables.");
+    return res.status(500).send("Server-side API key not configured.");
+  }
+
+  const results = maxResults ? `&maxResults=${encodeURIComponent(maxResults)}` : "";
+  const ebirdUrl = `https://api.ebird.org/v2/data/obs/geo/recent?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}${results}`;
+  console.log('recentObservations ebirdUrl:', ebirdUrl);
+
+  try {
+    const ebirdResponse = await fetch(ebirdUrl, { headers: { "X-eBirdApiToken": apiKey } });
+    if (!ebirdResponse.ok) {
+      const errorBody = await ebirdResponse.text();
+      return res
+        .status(ebirdResponse.status)
+        .send(`eBird API Error: ${ebirdResponse.status}. Details: ${errorBody.substring(0, 200)}...`);
+    }
+
+    const data = await ebirdResponse.json();
+    res.json(data);
+  } catch (error) {
+    console.error("Server Proxy Failed (recentObservations):", error);
+    res.status(500).send("Internal server error during fetch to eBird.");
+  }
+});
+
+// Serve static files from /public folder (useful when running Node locally, optional on Vercel).
+app.use(express.static('public'));
+
+// Diagnostic: list registered routes (temporary)
+app.get('/__routes', (req, res) => {
+  try {
+    const routes = [];
+    app._router.stack.forEach(mw => {
+      if (mw.route && mw.route.path) {
+        const methods = Object.keys(mw.route.methods).join(',');
+        routes.push({ path: mw.route.path, methods });
+      }
+    });
+    res.json(routes);
+  } catch (err) {
+    res.status(500).send(String(err));
   }
 });
 
